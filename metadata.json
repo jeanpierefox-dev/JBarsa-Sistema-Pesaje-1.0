@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Gestión de Pesaje de Pollos 1.1",
+  "description": "Sistema profesional para el control de pesaje avícola, gestión de clientes y proveedores con reportes inteligentes.",
+  "requestFramePermissions": [
+    "bluetooth"
+  ]
+}
