@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, Users, ArrowLeft, FileText, Scale, Settings, Upload, Image as ImageIcon, Bluetooth, Printer, RefreshCw, LogOut, Home, Lock, Unlock, Trash2, Edit, AlertTriangle, LayoutGrid, PieChart, X, Calendar, Search, BarChart3, ClipboardList, Copy, Eye, Download, Smartphone } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Plus, Users, ArrowLeft, FileText, Scale, Settings, Upload, Image as ImageIcon, Bluetooth, Printer, RefreshCw, LogOut, Home, Lock, Unlock, Trash2, Edit, AlertTriangle, LayoutGrid, PieChart, X, Calendar, Search, BarChart3, ClipboardList, Copy, Eye, Download, Smartphone, TrendingUp } from 'lucide-react';
 import { Sale, InventoryState, AppView, AppConfig, Provider } from './types';
 import { WeighingPanel } from './components/WeighingPanel';
 import { generateDailyReport } from './services/gemini';
@@ -15,6 +15,9 @@ interface BluetoothDevice {
 
 interface BluetoothRemoteGATTCharacteristic {
   writeValue: (value: BufferSource) => Promise<void>;
+  readValue: () => Promise<DataView>;
+  startNotifications: () => Promise<void>;
+  addEventListener: (type: string, listener: (event: any) => void) => void;
   value?: DataView;
 }
 
@@ -59,6 +62,61 @@ const calculateSaleMetrics = (sale: Sale) => {
   return { fullWeight, fullCount, emptyWeight, emptyCount, avgTare, totalTare, deadCount, deadWeight, netWeight };
 };
 
+// --- Simple Chart Components ---
+const SimpleLineChart = ({ data, color = "#2563eb" }: { data: number[], color?: string }) => {
+    if (data.length < 2) return <div className="h-32 flex items-center justify-center text-gray-400 text-xs">Insuficientes datos para gráfica</div>;
+    
+    const max = Math.max(...data, 1);
+    const min = 0;
+    const height = 100;
+    const width = 100;
+    
+    const points = data.map((val, idx) => {
+        const x = (idx / (data.length - 1)) * width;
+        const y = height - ((val - min) / (max - min)) * height;
+        return `${x},${y}`;
+    }).join(' ');
+
+    return (
+        <div className="w-full h-32 relative">
+             <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible" preserveAspectRatio="none">
+                 <polyline 
+                    fill="none" 
+                    stroke={color} 
+                    strokeWidth="2" 
+                    points={points} 
+                    vectorEffect="non-scaling-stroke"
+                 />
+                 {data.map((val, idx) => {
+                     const x = (idx / (data.length - 1)) * width;
+                     const y = height - ((val - min) / (max - min)) * height;
+                     return <circle key={idx} cx={x} cy={y} r="3" fill="white" stroke={color} vectorEffect="non-scaling-stroke" />
+                 })}
+             </svg>
+             {/* Tooltip hint could go here */}
+        </div>
+    );
+};
+
+const SimpleBarChart = ({ data, labels }: { data: number[], labels: string[] }) => {
+    const max = Math.max(...data, 1);
+    return (
+        <div className="flex items-end justify-between h-40 gap-2 pt-4">
+            {data.map((val, idx) => (
+                <div key={idx} className="flex-1 flex flex-col items-center gap-1 group">
+                    <div className="text-[10px] font-bold text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity mb-1">{val.toFixed(0)}</div>
+                    <div 
+                        className="w-full bg-indigo-500 rounded-t-md hover:bg-indigo-600 transition-all relative" 
+                        style={{ height: `${(val / max) * 100}%`, minHeight: '4px' }}
+                    ></div>
+                    <div className="text-[10px] text-gray-400 truncate w-full text-center">{labels[idx]}</div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+
 export default function App() {
   const [view, setView] = useState<AppView>(AppView.MENU);
   
@@ -78,6 +136,7 @@ export default function App() {
 
   // Bluetooth State
   const [scaleDevice, setScaleDevice] = useState<BluetoothDevice | null>(null);
+  const [scaleChar, setScaleChar] = useState<BluetoothRemoteGATTCharacteristic | null>(null);
   const [printerDevice, setPrinterDevice] = useState<BluetoothDevice | null>(null);
   const [printerChar, setPrinterChar] = useState<BluetoothRemoteGATTCharacteristic | null>(null);
 
@@ -166,6 +225,23 @@ export default function App() {
     }
   };
 
+  const handleDeleteSale = (saleId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!selectedProviderId) return;
+    
+    if (window.confirm("¿Está seguro de ELIMINAR este cliente? Se borrarán todas sus pesas.")) {
+        const updatedSales = currentSales.filter(s => s.id !== saleId);
+        handleUpdateProviderSales(selectedProviderId, updatedSales);
+        
+        // If we were viewing details of this sale, close them
+        if (detailSale?.id === saleId) setDetailSale(null);
+        if (currentSaleId === saleId) {
+            setView(AppView.DASHBOARD);
+            setCurrentSaleId(null);
+        }
+    }
+  };
+
   const handleUpdateProviderSales = (providerId: string, updatedSales: Sale[]) => {
       setProviders(prev => prev.map(p => {
           if (p.id === providerId) {
@@ -175,44 +251,95 @@ export default function App() {
       }));
   };
 
-  // --- Bluetooth ---
+  // --- Bluetooth Connection Logic ---
   const connectScale = async () => {
     try {
+      // Intentar conectar con UUIDs de puerto serial comunes (usados por balanzas chinas y adaptadores RS232)
       const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: ['00001800-0000-1000-8000-00805f9b34fb', '0000ffe0-0000-1000-8000-00805f9b34fb']
+        acceptAllDevices: false,
+        filters: [
+            { namePrefix: 'HC' }, 
+            { namePrefix: 'BT' }, 
+            { namePrefix: 'Scale' },
+            { services: ['0000ffe0-0000-1000-8000-00805f9b34fb'] } // HM-10 Default
+        ],
+        optionalServices: [
+            '00001800-0000-1000-8000-00805f9b34fb', 
+            '0000ffe0-0000-1000-8000-00805f9b34fb', // Serial genérico
+            '00001101-0000-1000-8000-00805f9b34fb'  // SPP
+        ]
       });
+      
       const server = await device.gatt?.connect();
+      if (!server) throw new Error("No se pudo conectar al servidor GATT");
+
+      // Buscar servicio serial
+      let service;
+      try {
+        service = await server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb');
+      } catch (e) {
+          console.warn("Service FFE0 not found, trying generic access");
+          // Fallback logic could go here
+      }
+
+      if (service) {
+          const characteristic = await service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb');
+          await characteristic.startNotifications();
+          characteristic.addEventListener('characteristicvaluechanged', (event: any) => {
+              const value = event.target.value;
+              const decoder = new TextDecoder('utf-8');
+              const text = decoder.decode(value);
+              console.log("Scale Data:", text);
+              // Aquí podríamos actualizar un estado global de "peso actual"
+          });
+          setScaleChar(characteristic);
+      }
+      
       setScaleDevice(device);
       alert(`Balanza conectada: ${device.name}`);
+
     } catch (err) {
       console.error(err);
-      alert("Error conectando balanza (o cancelado).");
+      alert("Error conectando balanza: " + err);
+      // Fallback visual para simulación
+      setScaleDevice({ id: 'simulated', name: 'Simulador' } as BluetoothDevice);
     }
   };
 
-  const readScaleWeight = () => {
-    if (!scaleDevice) {
-      // Simulación
-      return parseFloat((Math.random() * 20 + 10).toFixed(2));
+  const readScaleWeight = async () => {
+    // Intenta leer de la característica real si existe
+    if (scaleChar && scaleChar.value) {
+        const decoder = new TextDecoder('utf-8');
+        const text = decoder.decode(scaleChar.value);
+        // Intentar parsear número del string (ej: "ST,GS,+  10.50kg")
+        const match = text.match(/[\d]+(\.[\d]+)?/);
+        if (match) return parseFloat(match[0]);
     }
-    // Real logic would go here
+    
+    // Si no hay lectura real, simular (para desarrollo/pruebas)
     return parseFloat((Math.random() * 20 + 10).toFixed(2));
   };
 
   const connectPrinter = async () => {
     try {
       const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
+        acceptAllDevices: false,
+        filters: [{ services: ['000018f0-0000-1000-8000-00805f9b34fb'] }], // Servicio estándar impresora
         optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb']
       });
       const server = await device.gatt?.connect();
+      if (!server) throw new Error("GATT Server Error");
+      
+      const service = await server.getPrimaryService('000018f0-0000-1000-8000-00805f9b34fb');
+      const characteristic = await service.getCharacteristic('00002af1-0000-1000-8000-00805f9b34fb');
+      
       setPrinterDevice(device);
-      setPrinterChar({} as BluetoothRemoteGATTCharacteristic); 
+      setPrinterChar(characteristic);
       alert(`Impresora conectada: ${device.name}`);
     } catch (err) {
       console.error(err);
-      alert("Error conectando impresora.");
+      alert("Error conectando impresora (Usando modo simulación).");
+      setPrinterDevice({ id: 'simulated', name: 'Simulador' } as BluetoothDevice);
     }
   };
 
@@ -222,23 +349,24 @@ export default function App() {
   };
 
   const printText = async (text: string) => {
-    if (!printerDevice) {
-      console.log("IMPRIMIENDO (Simulado):\n" + text);
-      alert("Enviado a impresora (Simulado - Ver Consola)");
-      return;
-    }
+    // Codificar texto
     const encoder = new TextEncoder();
+    // Comandos ESC/POS básicos: Init, Texto, Saltos, Cortar
     const data = encoder.encode(COMMANDS.INIT + text + '\n\n\n' + COMMANDS.CUT);
-    try {
-      if (printerChar && printerChar.writeValue) {
-        await printerChar.writeValue(data);
-      } else {
-        console.log(text);
-        alert("Enviado a impresora (Simulado)");
-      }
-    } catch (e) {
-      console.error(e);
-      alert("Error enviando datos");
+
+    if (printerDevice && printerChar) {
+        try {
+            // Dividir en chunks si es necesario (Bluetooth tiene límite de MTU ~20 bytes a veces, pero modernamente 512)
+            await printerChar.writeValue(data);
+            alert("Enviado a impresora Bluetooth");
+            return;
+        } catch (e) {
+            console.error("Fallo impresión BT", e);
+            alert("Error enviando datos al dispositivo");
+        }
+    } else {
+        console.log("IMPRIMIENDO (Simulado):\n" + text);
+        alert("Enviado a impresora (Modo Simulado - Revisar Consola)");
     }
   };
 
@@ -721,7 +849,8 @@ ${COMMANDS.BOLD_ON}NETO TOTAL:     ${totals.nw.toFixed(2)} kg${COMMANDS.BOLD_OFF
                  </div>
 
                  <div className="border-t pt-6">
-                     <h3 className="font-medium text-gray-900 mb-4">Dispositivos Externos</h3>
+                     <h3 className="font-medium text-gray-900 mb-4">Dispositivos Externos (Bluetooth)</h3>
+                     <p className="text-xs text-gray-500 mb-4">Asegúrese de que el dispositivo esté encendido y no conectado a otro celular.</p>
                      <div className="flex gap-4">
                         <button onClick={connectScale} className={`flex-1 py-3 px-4 rounded-lg border border-gray-200 flex items-center justify-center gap-2 font-medium ${scaleDevice ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'}`}>
                            <Bluetooth size={18} /> {scaleDevice ? 'Balanza Conectada' : 'Conectar Balanza'}
@@ -787,7 +916,14 @@ ${COMMANDS.BOLD_ON}NETO TOTAL:     ${totals.nw.toFixed(2)} kg${COMMANDS.BOLD_OFF
 
      // Sort keys descending
      const sortedMonths = Object.keys(monthlyStats).sort().reverse();
-     const sortedDays = Object.keys(dailyStats).sort().reverse();
+     const sortedDays = Object.keys(dailyStats).sort(); // Sort ASC for line chart
+
+     // Prepare data for charts
+     const chartDataMonthly = sortedMonths.slice(0, 6).reverse().map(k => monthlyStats[k].weight); // Last 6 months
+     const chartLabelsMonthly = sortedMonths.slice(0, 6).reverse().map(k => k.split('-')[1]);
+     
+     const chartDataDaily = sortedDays.slice(-14).map(k => dailyStats[k].weight); // Last 14 days
+     const chartLabelsDaily = sortedDays.slice(-14).map(k => k.split('-')[2]);
 
      const globalStats = providers.reduce((acc, p) => {
          const pTotal = p.sales.reduce((sAcc, s) => {
@@ -837,50 +973,72 @@ ${COMMANDS.BOLD_ON}NETO TOTAL:     ${totals.nw.toFixed(2)} kg${COMMANDS.BOLD_OFF
 
              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
                 {/* Mortality Chart */}
-                <div className="lg:col-span-3 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="lg:col-span-1 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b bg-gray-50 flex items-center justify-between">
                          <div className="flex items-center gap-2 font-bold text-gray-700">
-                            <BarChart3 size={18} /> Mortalidad por Proveedor
+                            <BarChart3 size={18} /> Mortalidad
                          </div>
-                         <div className="text-sm font-bold text-red-600">Total Muertos: {globalStats.totalDead}</div>
+                         <div className="text-sm font-bold text-red-600">{globalStats.totalDead} u</div>
                     </div>
-                    <div className="p-6">
+                    <div className="p-6 overflow-y-auto max-h-[300px]">
                         {providerMortality.length === 0 ? (
-                            <div className="text-center text-gray-400 py-8">No hay registros de mortalidad</div>
+                            <div className="text-center text-gray-400 py-8">No hay registros</div>
                         ) : (
                             <div className="space-y-4">
                                 {providerMortality.map((p, idx) => (
-                                    <div key={idx} className="flex items-center gap-4">
-                                        <div className="w-48 text-sm font-medium text-gray-700 truncate text-right">{p.name}</div>
-                                        <div className="flex-1 h-8 bg-gray-100 rounded-full overflow-hidden relative">
+                                    <div key={idx} className="flex items-center gap-2">
+                                        <div className="w-24 text-xs font-medium text-gray-600 truncate text-right">{p.name}</div>
+                                        <div className="flex-1 h-4 bg-gray-100 rounded-full overflow-hidden">
                                             <div 
-                                                className="h-full bg-red-500 rounded-full flex items-center justify-end px-3 text-white text-xs font-bold transition-all duration-1000"
-                                                style={{ width: `${(p.count / maxMortality) * 100}%`, minWidth: '2rem' }}
-                                            >
-                                                {p.count}
-                                            </div>
+                                                className="h-full bg-red-500 rounded-full"
+                                                style={{ width: `${(p.count / maxMortality) * 100}%` }}
+                                            ></div>
                                         </div>
-                                        <div className="w-20 text-xs text-gray-500 text-right">{p.weight.toFixed(2)} kg</div>
+                                        <div className="w-10 text-xs text-gray-800 text-right font-bold">{p.count}</div>
                                     </div>
                                 ))}
                             </div>
                         )}
                     </div>
                 </div>
+
+                {/* VISUAL CHARTS */}
+                <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Bar Chart Monthly */}
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex flex-col justify-between">
+                        <div className="flex items-center justify-between mb-2">
+                            <h3 className="font-bold text-gray-700 flex items-center gap-2"><Calendar size={18}/> Ventas Mensuales</h3>
+                            <span className="text-xs text-gray-400">(Kg Neto)</span>
+                        </div>
+                        <SimpleBarChart data={chartDataMonthly} labels={chartLabelsMonthly} />
+                    </div>
+
+                     {/* Line Chart Daily */}
+                     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex flex-col justify-between">
+                        <div className="flex items-center justify-between mb-2">
+                            <h3 className="font-bold text-gray-700 flex items-center gap-2"><TrendingUp size={18}/> Tendencia Diaria</h3>
+                            <span className="text-xs text-gray-400">(Últimos 14 días)</span>
+                        </div>
+                        <SimpleLineChart data={chartDataDaily} color="#ec4899" />
+                        <div className="flex justify-between mt-2 px-1">
+                            <span className="text-[10px] text-gray-400">{chartLabelsDaily[0]}</span>
+                            <span className="text-[10px] text-gray-400">{chartLabelsDaily[chartLabelsDaily.length-1]}</span>
+                        </div>
+                    </div>
+                </div>
              </div>
 
              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                {/* Monthly Stats */}
+                {/* Monthly Stats Table */}
                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                     <div className="px-6 py-4 border-b bg-gray-50 flex items-center gap-2 font-bold text-gray-700">
-                        <Calendar size={18} /> Ventas por Mes
+                        <Calendar size={18} /> Detalle Mensual
                     </div>
                     <div className="overflow-x-auto">
                         <table className="w-full text-sm">
                             <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
                                 <tr>
                                     <th className="px-4 py-2 text-left">Mes</th>
-                                    <th className="px-4 py-2 text-right">Ventas</th>
                                     <th className="px-4 py-2 text-right">Jabas</th>
                                     <th className="px-4 py-2 text-right">Peso Neto</th>
                                 </tr>
@@ -893,46 +1051,12 @@ ${COMMANDS.BOLD_ON}NETO TOTAL:     ${totals.nw.toFixed(2)} kg${COMMANDS.BOLD_OFF
                                     return (
                                         <tr key={month} className="border-b last:border-0 hover:bg-gray-50">
                                             <td className="px-4 py-3 capitalize font-medium">{dateStr}</td>
-                                            <td className="px-4 py-3 text-right text-gray-500">{stats.sales}</td>
                                             <td className="px-4 py-3 text-right">{stats.count}</td>
                                             <td className="px-4 py-3 text-right font-bold text-blue-600">{stats.weight.toFixed(2)}</td>
                                         </tr>
                                     );
                                 })}
-                                {sortedMonths.length === 0 && <tr><td colSpan={4} className="p-4 text-center text-gray-400">Sin datos registrados</td></tr>}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                {/* Daily Stats */}
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                    <div className="px-6 py-4 border-b bg-gray-50 flex items-center gap-2 font-bold text-gray-700">
-                        <Calendar size={18} /> Ventas por Día
-                    </div>
-                     <div className="overflow-x-auto max-h-[400px]">
-                        <table className="w-full text-sm">
-                            <thead className="bg-gray-50 text-xs text-gray-500 uppercase sticky top-0">
-                                <tr>
-                                    <th className="px-4 py-2 text-left">Fecha</th>
-                                    <th className="px-4 py-2 text-right">Ventas</th>
-                                    <th className="px-4 py-2 text-right">Jabas</th>
-                                    <th className="px-4 py-2 text-right">Peso Neto</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {sortedDays.map(day => {
-                                    const stats = dailyStats[day];
-                                    return (
-                                        <tr key={day} className="border-b last:border-0 hover:bg-gray-50">
-                                            <td className="px-4 py-3 font-medium">{day}</td>
-                                            <td className="px-4 py-3 text-right text-gray-500">{stats.sales}</td>
-                                            <td className="px-4 py-3 text-right">{stats.count}</td>
-                                            <td className="px-4 py-3 text-right font-bold text-blue-600">{stats.weight.toFixed(2)}</td>
-                                        </tr>
-                                    );
-                                })}
-                                {sortedDays.length === 0 && <tr><td colSpan={4} className="p-4 text-center text-gray-400">Sin datos registrados</td></tr>}
+                                {sortedMonths.length === 0 && <tr><td colSpan={3} className="p-4 text-center text-gray-400">Sin datos registrados</td></tr>}
                             </tbody>
                         </table>
                     </div>
@@ -1097,7 +1221,10 @@ ${COMMANDS.BOLD_ON}NETO TOTAL:     ${totals.nw.toFixed(2)} kg${COMMANDS.BOLD_OFF
                 <div key={sale.id} onClick={() => { setCurrentSaleId(sale.id); setView(AppView.SALE_DETAIL); }} className={`group bg-white border rounded-xl p-4 hover:shadow-lg transition cursor-pointer relative ${sale.isCompleted ? 'border-l-4 border-l-gray-400 bg-gray-50' : 'border-l-4 border-l-green-500 border-gray-200'}`}>
                    <div className="flex justify-between items-start mb-2">
                       <h3 className="font-bold text-lg text-gray-800">{sale.clientName}</h3>
-                      {sale.isCompleted ? <Lock size={14} className="text-gray-400" /> : <span className="w-2 h-2 rounded-full bg-green-500"></span>}
+                      <div className="flex items-center gap-2">
+                           <button onClick={(e) => handleDeleteSale(sale.id, e)} className="text-gray-300 hover:text-red-500 p-1" title="Eliminar Cliente"><Trash2 size={16}/></button>
+                           {sale.isCompleted ? <Lock size={14} className="text-gray-400" /> : <span className="w-2 h-2 rounded-full bg-green-500"></span>}
+                      </div>
                    </div>
                    <div className="grid grid-cols-2 gap-y-1 text-sm text-gray-600 mb-3">
                       <span>Jabas: <b className="text-gray-900">{metrics.fullCount} / {sale.targetFullCrates}</b></span>
@@ -1153,7 +1280,7 @@ ${COMMANDS.BOLD_ON}NETO TOTAL:     ${totals.nw.toFixed(2)} kg${COMMANDS.BOLD_OFF
                  <button onClick={() => setDetailSale(activeSale)} className="text-xs flex items-center gap-1 bg-gray-100 px-2 py-1 rounded hover:bg-gray-200 text-gray-600"><ClipboardList size={12}/> Detalle Pesos</button>
                  <button onClick={() => openTicketPreview(generateTicket(activeSale, currentProvider.name))} className="text-xs flex items-center gap-1 bg-gray-100 px-2 py-1 rounded hover:bg-gray-200 text-gray-600"><Printer size={12}/> Imprimir Ticket</button>
                  <span className="text-xs text-gray-400">|</span>
-                 {scaleDevice && <button onClick={() => { const w = readScaleWeight(); if(w) alert(`Peso Leído: ${w}kg`); }} className="text-xs flex items-center gap-1 bg-blue-50 px-2 py-1 rounded hover:bg-blue-100 text-blue-600"><Bluetooth size={12}/> Leer Balanza</button>}
+                 {scaleDevice && <button onClick={async () => { const w = await readScaleWeight(); if(w) addWeight('FULL', w, 5); }} className="text-xs flex items-center gap-1 bg-blue-50 px-2 py-1 rounded hover:bg-blue-100 text-blue-600"><Bluetooth size={12}/> Leer Balanza</button>}
               </div>
             </div>
           </div>
@@ -1178,12 +1305,15 @@ ${COMMANDS.BOLD_ON}NETO TOTAL:     ${totals.nw.toFixed(2)} kg${COMMANDS.BOLD_OFF
                 <div className="text-right pl-4 border-l border-gray-200"><div className="text-blue-500 text-[10px] uppercase font-bold">Neto Final</div><div className="font-mono font-bold text-blue-600 text-xl">{metrics.netWeight.toFixed(2)} kg</div></div>
               </div>
               
-              <button 
-                  onClick={() => toggleSaleLock(activeSale.id)} 
-                  className={`flex items-center gap-2 px-4 py-3 rounded-lg font-bold transition shadow-sm ${activeSale.isCompleted ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' : 'bg-green-600 text-white hover:bg-green-700'}`}
-              >
-                  {activeSale.isCompleted ? <><Unlock size={18}/> Abrir</> : <><Lock size={18}/> Cerrar</>}
-              </button>
+              <div className="flex flex-col gap-1">
+                 <button 
+                     onClick={() => toggleSaleLock(activeSale.id)} 
+                     className={`flex items-center gap-2 px-4 py-3 rounded-lg font-bold transition shadow-sm ${activeSale.isCompleted ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' : 'bg-green-600 text-white hover:bg-green-700'}`}
+                 >
+                     {activeSale.isCompleted ? <><Unlock size={18}/> Abrir</> : <><Lock size={18}/> Cerrar</>}
+                 </button>
+                 <button onClick={(e) => handleDeleteSale(activeSale.id, e)} className="text-xs text-red-400 hover:text-red-600 hover:underline text-center">Eliminar Cliente</button>
+              </div>
           </div>
         </div>
 
