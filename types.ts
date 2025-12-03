@@ -43,6 +43,8 @@ export interface InventoryState {
 
 export interface AppConfig {
   appLogo?: string;
+  printerType?: 'BLUETOOTH' | 'WIFI'; // WIFI uses system driver/window.print
+  printerIp?: string; // Optional for future implementations
 }
 
 export enum AppView {

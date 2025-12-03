@@ -678,7 +678,8 @@ PROMEDIO POLLO: ${totalAvg.toFixed(3)} kg
   };
 
   // --- Views ---
-  const renderSettings = () => (
+  const renderSettings = () => {
+    return (
     <div className="max-w-2xl mx-auto animate-fade-in">
         <button onClick={() => setView(AppView.MENU)} className="flex items-center gap-2 text-gray-500 hover:text-gray-800 mb-6 font-medium">
              <ArrowLeft size={20} /> Volver al Menú
@@ -749,14 +750,15 @@ PROMEDIO POLLO: ${totalAvg.toFixed(3)} kg
 
                  <div className="border-t pt-6">
                      <h3 className="font-medium text-red-600 mb-4">Zona de Peligro</h3>
-                     <button onClick={() => { if(confirm("¿Borrar todos los datos?")) { localStorage.clear(); window.location.reload(); }}} className="text-red-600 hover:bg-red-50 px-4 py-2 rounded border border-red-200 text-sm font-medium">
+                     <button onClick={() => { if(window.confirm("¿Borrar todos los datos?")) { localStorage.clear(); window.location.reload(); }}} className="text-red-600 hover:bg-red-50 px-4 py-2 rounded border border-red-200 text-sm font-medium">
                          Restablecer Fábrica (Borrar Todo)
                      </button>
                  </div>
              </div>
         </div>
     </div>
-  );
+    );
+  };
 
   const renderGlobalSummary = () => {
      // Prepare data for charts
@@ -809,7 +811,7 @@ PROMEDIO POLLO: ${totalAvg.toFixed(3)} kg
                  </div>
              </div>
          </div>
-     )
+     );
   };
 
   const renderMainMenu = () => (
