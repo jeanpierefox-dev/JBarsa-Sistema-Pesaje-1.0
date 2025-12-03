@@ -17,43 +17,36 @@
     <meta name="apple-mobile-web-app-title" content="Pesaje Pollo">
     <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/1998/1998610.png">
     
-    <!-- Tailwind CSS (CDN para simplicidad, idealmente usaría postcss en build) -->
+    <!-- Tailwind CSS (CDN para asegurar estilos incluso si postcss falla) -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     
     <style>
       body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; overscroll-behavior-y: none; }
-      /* Disable select on UI elements for app-like feel */
       button { -webkit-tap-highlight-color: transparent; user-select: none; }
     </style>
-  <script type="importmap">
+<script type="importmap">
 {
   "imports": {
-    "react": "https://aistudiocdn.com/react@^19.2.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
-    "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
-    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0",
     "vite": "https://aistudiocdn.com/vite@^7.2.6",
-    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1"
+    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.555.0",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0"
   }
 }
 </script>
 </head>
   <body>
     <div id="root"></div>
-    
-    <!-- Script principal de la aplicación (Vite lo procesará) -->
     <script type="module" src="/index.tsx"></script>
-    
     <script>
-      // Registro del Service Worker para soporte PWA/Offline
-      // Nota: En producción con Vite, se recomienda usar vite-plugin-pwa, pero esto funcionará de forma básica.
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('./sw.js')
-            .then((reg) => console.log('Service Worker registrado:', reg))
-            .catch((err) => console.log('Error registrando SW:', err));
+            .catch((err) => console.log('SW Error:', err));
         });
       }
     </script>
